@@ -7,7 +7,35 @@
 import argparse
 import logging
 import torch
+import models.transformer as transformer
+import models.tokenizer as tokenizer
 from models import Transformer, BytePairEncoder
+
+def setup_logging(log_level: str, infer_logger : logging.Logger, file_name: str = "inference.log"):
+    level_map = {
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "no": logging.WARNING,
+    }
+    file_level = level_map.get(log_level, logging.INFO)
+    console_level = logging.INFO if log_level != "no" else logging.WARNING
+
+    file_handler = logging.FileHandler(file_name)
+    file_handler.setLevel(file_level)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(console_level)
+    console_handler.setFormatter(logging.Formatter('[%(levelname)s] %(message)s'))
+
+    loggers = [transformer.logger, tokenizer.logger, logging.getLogger("inference.py")]
+
+    for logger in loggers:
+        logger.setLevel(logging.DEBUG) 
+        if not logger.hasHandlers():
+            logger.addHandler(file_handler)
+            logger.addHandler(console_handler)
 
 def main():
     parser = argparse.ArgumentParser(description="Inference argument parser")
@@ -20,58 +48,9 @@ def main():
     args = parser.parse_args()
 
     infer_logger = logging.getLogger("inference.py")
-    infer_logger.setLevel(logging.INFO)  # Set to DEBUG for detailed logs
 
-    if args.log == "debug":
-        file_handler = logging.FileHandler()
-        file_handler.setLevel(logging.DEBUG)  # Set to DEBUG for detailed logs 
-
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)  # Set to INFO for less verbose logs
-
-        file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        console_formatter = logging.Formatter('[%(levelname)s] %(message)s')
-
-        file_handler.setFormatter(file_formatter)
-        console_handler.setFormatter(console_formatter)
-
-        infer_logger.info("Logging is set to %s", args.log)
-
-    elif args.log == "info":
-        file_handler = logging.FileHandler()
-        file_handler.setLevel(logging.INFO)  # Set to DEBUG for detailed logs 
-
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)  # Set to INFO for less verbose logs
-
-        file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        console_formatter = logging.Formatter('[%(levelname)s] %(message)s')
-
-        file_handler.setFormatter(file_formatter)
-        console_handler.setFormatter(console_formatter)
-
-        infer_logger.info("Logging is set to %s", args.log)
-
-    else:
-        file_handler = logging.FileHandler()
-        file_handler.setLevel(logging.WARNING)  # Set to DEBUG for detailed logs 
-
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.WARNING)  # Set to INFO for less verbose logs
-
-        file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        console_formatter = logging.Formatter('[%(levelname)s] %(message)s')
-
-        file_handler.setFormatter(file_formatter)
-        console_handler.setFormatter(console_formatter)
-
-        infer_logger.info("Logging is set to %s", args.log)
-    
-    for logger in [Transformer.logger, BytePairEncoder.logger]:
-        logger.setLevel(logging.DEBUG)
-        if not logger.hasHandlers():
-            logger.addHandler(file_handler)
-            logger.addHandler(console_handler)
+    setup_logging(args.log, infer_logger)
+    infer_logger.info("Logging is set to %s", args.log)
 
     # Load the model
     model = Transformer()
@@ -94,3 +73,6 @@ def main():
     results = tokenizer.detokenize(results_tokens)
 
     print("Inference results:\n", results)
+
+if __name__ == "__main__":
+    main()
