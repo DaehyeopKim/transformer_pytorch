@@ -1,6 +1,7 @@
 import torch
+import torch.nn as nn
 
-class RotaryPositionalEncoder:
+class RotaryPositionalEmbedding(nn.Module):
     def __init__(self, dim, max_len=5000):
         self.dim = dim
         self.max_len = max_len
