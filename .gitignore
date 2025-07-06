@@ -2,4 +2,4 @@
 checkpoint/
 dataset/
 virtual_test.py
-**/__pycache__/
+models/__pycache__/
