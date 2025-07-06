@@ -17,6 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import logging
 import utils.positional_encoder as positional_encoder
+import utils.inference as inference
 
 __all__ = [
     "FeedForward",
@@ -226,43 +227,296 @@ class MultiHeadAttention(nn.Module):
         else:
             grad_x = grad_q_input + grad_k_input + grad_v_input
             return grad_x
-
-class DecoderBlock:
-    def __init__(self, model_name):
-        self.model_name = model_name
-
-    def forward(self, x):
-        # Dummy forward method
-        return x * 2
     
-class EncoderBlock:
-    def __init__(self, model_name):
-        self.model_name = model_name
+class EncoderBlock(nn.Module):
+    def __init__(self, embed_dim, ffn_dim, head_num, k_dim, v_dim):
+        super().__init__()
+        self.self_attention = MultiHeadAttention(embed_dim, head_num, k_dim, v_dim)
+        self.feed_forward = FeedForward(embed_dim, ffn_dim)
+        self.norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
-        # Dummy forward method
-        return x * 2
-
-class Encoder:
-    def __init__(self, model_name):
-        self.model_name = model_name
-
-    def forward(self, x):
-        # Dummy forward method
-        return x * 2
+        """
+        Forward pass for the encoder block.
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, embed_dim).
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, seq_len, embed_dim).
+        """
+        # Self-attention
+        attn_output = self.self_attention(x)
+        x = self.norm(x + attn_output)
+        ff = self.feed_forward(x)
+        x = self.norm(ff + x)
+        return x
     
-class Decoder:
-    def __init__(self, model_name):
-        self.model_name = model_name
+    def backward(self, grad_output):
+        """
+        Backward pass for the encoder block.
+        Args:
+            grad_output (torch.Tensor): Gradient of the output tensor.
+        Returns:
+            torch.Tensor: Gradient of the input tensor.
+        """
+        # Backward pass through feed-forward
+        grad_output = self.norm.backward(grad_output)
+        grad_ff = self.feed_forward.backward(grad_output)
+        grad_x = grad_output + grad_ff
+        
+        # Backward pass through self-attention
+        grad_output = self.norm.backward(grad_x)
+        grad_attn = self.self_attention.backward(grad_output)
+        grad_x = grad_attn + grad_output 
+        
+        return grad_x
+
+class Encoder(nn.Module):
+    def __init__(self, embed_dim, ffn_dim, head_num, k_dim, v_dim, N):
+        super().__init__()
+        self.blocks = nn.Sequential()
+        for i in range(N):
+            self.blocks.add_module(f"encoder_block_{i}", EncoderBlock(embed_dim, ffn_dim, head_num, k_dim, v_dim))
 
     def forward(self, x):
-        # Dummy forward method
-        return x * 2
+        """
+        Forward pass for the encoder.
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, embed_dim).
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, seq_len, embed_dim).
+        """
+        for block in self.blocks:
+            x = block(x)
+        return x    
+    
+    def backward(self, grad_output):
+        """
+        Backward pass for the encoder.
+        Args:
+            grad_output (torch.Tensor): Gradient of the output tensor.
+        Returns:
+            torch.Tensor: Gradient of the input tensor.
+        """
+        for block in reversed(self.blocks):
+            grad_output = block.backward(grad_output)
+        return grad_output
+
+class DecoderBlock(nn.Module):
+    def __init__(self, embed_dim, ffn_dim, head_num, k_dim, v_dim):
+        super().__init__()
+        self.self_attention = MultiHeadAttention(embed_dim, head_num, k_dim, v_dim)
+        self.cross_attention = MultiHeadAttention(embed_dim, head_num, k_dim, v_dim, cross_attention=True)
+        self.feed_forward = FeedForward(embed_dim, ffn_dim)
+        self.norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, x, memory=None):
+        """
+        Forward pass for the decoder block.
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, embed_dim).
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, seq_len, embed_dim).
+        """
+        if memory is None:
+            raise ValueError("Memory tensor must be provided for decoder block.")
+        
+        # Self-attention
+        self_attn_output = self.self_attention(x, mask=generate_mask(x.size(1), x.device))
+        self_attn_output = self.norm(x + self_attn_output)
+        
+        # Cross-attention
+        cross_attn_output = self.cross_attention(x, memory)
+        cross_attn_output = self.norm(self_attn_output + cross_attn_output)
+        
+        # Feed-forward
+        ff_output = self.feed_forward(cross_attn_output)
+        ff_output = self.norm(cross_attn_output + ff_output)
+
+        return ff_output
+    
+    def backward(self, grad_output, memory=None):
+        """
+        Backward pass for the decoder block.
+        Args:
+            grad_output (torch.Tensor): Gradient of the output tensor.
+            memory (torch.Tensor): Memory tensor for cross-attention.
+        Returns:
+            (torch.Tensor, torch.Tensor) : Gradient of the input tensor.
+        """
+        if memory is None:
+            raise ValueError("Memory tensor must be provided for decoder block.")
+        
+        # Backward pass through feed-forward
+        grad_output = self.norm.backward(grad_output)
+        grad_ff = self.feed_forward.backward(grad_output)
+        grad_x = grad_output + grad_ff
+
+        # Backward pass through cross-attention
+        grad_output = self.norm.backward(grad_x)
+        grad_x, grad_memory = self.cross_attention.backward(grad_output, memory)
+        
+        # Backward pass through self-attention
+        grad_output = self.norm.backward(grad_x)
+        grad_attn = self.self_attention.backward(grad_output)
+        grad_x = grad_attn + grad_output 
+        
+        return grad_x, grad_memory
+
+class Decoder(nn.Module):
+    def __init__(self, embed_dim, ffn_dim, head_num, k_dim, v_dim, N):
+        super().__init__()
+        self.blocks = nn.Sequential()
+        for i in range(N):
+            self.blocks.add_module(f"decoder_block_{i}", DecoderBlock(embed_dim, ffn_dim, head_num, k_dim, v_dim))
+
+    def forward(self, x, memory=None):
+        """
+        Forward pass for the decoder.
+        Args:
+            x (torch.Tensor): Input tensor of shape (batch_size, seq_len, embed_dim).
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, seq_len, embed_dim).
+        """
+
+        for block in self.blocks:
+            x = block(x, memory)
+        return x
+    
+    def backward(self, grad_output, memory=None):
+        """
+        Backward pass for the decoder.
+        Args:
+            grad_output (torch.Tensor): Gradient of the output tensor.
+            memory (torch.Tensor): Memory tensor for cross-attention.
+        Returns:
+            (torch.Tensor, torch.Tensor): Gradient of the input tensor.
+        """
+        if memory is None:
+            raise ValueError("Memory tensor must be provided for decoder.")
+        
+        grad_memory_sum = torch.zeros_like(memory)
+        
+        for block in reversed(self.blocks):
+            grad_output, grad_memory = block.backward(grad_output, memory)
+            grad_memory_sum += grad_memory
+
+        return grad_output, grad_memory_sum
 
 class Transformer(nn.Module):
-    def __init__(self, model_name):
-        self.model_name = model_name
+    def __init__(self,
+                 device,
+                 eos_token_id,
+                 bos_token_id,
+                 token_size = 10000, 
+                 embed_dim = 512, 
+                 ffn_dim = 2048, 
+                 head_num = 8, 
+                 k_dim = 64, 
+                 v_dim = 64, 
+                 N = 6, 
+                 model_name = "Transformer"):
+        
+        super().__init__()
+        self.eos_token_id = eos_token_id
+        self.bos_token_id = bos_token_id
 
-    def forward(self, x):
-        # Dummy forward method
-        return x * 2
+        self.device = device
+        self.token_size = token_size
+
+        self.model_name = model_name
+        self.embedding = Embedding(token_size, embed_dim = embed_dim)
+        self.positional_encoding = positional_encoder.PositionalEncoding(embed_dim)
+        
+        self.encoder = Encoder(embed_dim, ffn_dim, head_num, k_dim, v_dim, N)
+        self.decoder = Decoder(embed_dim, ffn_dim, head_num, k_dim, v_dim, N)
+
+        self.output_layer = nn.Linear(embed_dim, token_size)  
+        self.softmax = nn.Softmax(dim=-1)  # Softmax layer for output probabilities
+
+        self.inference_method = inference.TransformerInference(self.decoder, eos_token_id)
+
+    def forward(self, input_token_ids, output_token_ids):
+        """
+        Forward pass for the transformer model. It's for training.
+        If you want to use the model for inference, please use the inference method.
+        Args:
+            input_token_ids (torch.Tensor): Input token tensor of shape (batch_size, seq_len).
+            output_token_ids (torch.Tensor): Output token tensor of shape (batch_size, seq_len).
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, seq_len, embed_dim).
+        """
+        if input_token_ids.dim() != 2:
+            raise ValueError(f"Input tensor input_token_ids must be 2-dimensional, got {input_token_ids.dim()} dimensions.")
+        
+        if output_token_ids.dim() != 2:
+            raise ValueError(f"Output tensor output_token_ids must be 2-dimensional, got {output_token_ids.dim()} dimensions.")
+        
+        # Embedding and positional encoding
+        input_embed = self.embedding(input_token_ids)  
+        output_embed = self.embedding(output_token_ids)
+
+        x = self.positional_encoding(x_embed)
+
+        # Encoder
+        encoder_output = self.encoder(x)
+
+        # Decoder
+        decoder_output = self.decoder(encoder_output, memory = encoder_output)
+
+        # Output layer
+        output = self.output_layer(decoder_output)  # (batch_size, seq_len, token_size)
+        logits = self.softmax(output)  # Apply softmax to get probabilities
+        
+        return logits
+
+    def inference(self, input_token_ids, max_length=50, inference_method="greedy"):
+        """
+        Inference pass for the transformer model.
+        Args:
+            input_token_ids (torch.Tensor): Input token tensor of shape (batch_size, seq_len).
+            bos_toke_id (int): BOS token id.
+        Returns:
+            torch.Tensor: Output tensor of shape (batch_size, seq_len, token_size).
+        """
+        if input_token_ids.dim() != 2:
+            raise ValueError(f"Input tensor input_token_ids must be 2-dimensional, got {input_token_ids.dim()} dimensions.")
+
+        batch_size = input_token_ids.size(0)
+
+        input_embed = self.embedding(input_token_ids)
+        x = self.positional_encoding(input_embed)
+        memory = self.encoder(x)
+
+        bos_token_ids = torch.full((batch_size, self.token_size), self.bos_token_id, device = self.device)
+
+        # Use the inference method to get the output
+        output_tokens_ids = self.inference_method(bos_token_ids, 
+                                              memory, 
+                                              max_length = max_length, 
+                                              inference_method = inference_method)
+
+        return output_tokens_ids
+
+
+     
+    def backward(self, grad_output, memory):
+        """
+        Backward pass for the transformer model.
+        Args:
+            grad_output (torch.Tensor): Gradient of the output tensor.
+        Returns:
+            torch.Tensor: Gradient of the input tensor.
+        """
+        # Backward pass through decoder
+        grad_decoder, grad_memory = self.decoder.backward(grad_output, memory)
+
+        # Backward pass through encoder
+        grad_encoder = self.encoder.backward(grad_memory)
+
+        # Backward pass through positional encoding
+        grad_positional = self.positional_encoding.backward(grad_encoder)
+
+        # Backward pass through embedding
+        grad_x = self.embedding.backward(grad_positional)
+
+        return grad_x
