@@ -10,6 +10,7 @@ import torch
 import models.transformer as transformer
 import models.tokenizer as tokenizer
 from models import Transformer, BytePairEncoder
+from utils.utils import load_transformer_with_config
 
 def setup_logging(log_level: str, infer_logger : logging.Logger, file_name: str = "inference.log"):
     level_map = {
@@ -41,10 +42,14 @@ def main():
     parser = argparse.ArgumentParser(description="Inference argument parser")
     parser.add_argument("--context", type=str, required=True, help="Context input file path")
     parser.add_argument("--query", type=str, required=True, help="Query input file path")
-
-    # y : enable logging, n : disable logging
     parser.add_argument("--log", type=str, default="info", choices=["debug", "info", "no"],
-                        help="Set logging level (debug, info, no - warning, error, critical). ")
+                        help="Set logging level (no : warning, error, critical). ")
+    parser.add_argument("--infermode", type=str, default="greedy", 
+                        choices=["greedy", "beam", "top_k", "top_p"], 
+                        help="Set inference mode")
+    parser.add_argument("--model_path", type=str, default="model.pth",
+                        help="Path to the model file")
+    
     args = parser.parse_args()
 
     infer_logger = logging.getLogger("inference.py")
@@ -52,25 +57,30 @@ def main():
     setup_logging(args.log, infer_logger)
     infer_logger.info("Logging is set to %s", args.log)
 
-    # Load the model
-    model = Transformer()
-    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     # Load context and query
-    context = torch.load(args.context)
-    query = torch.load(args.query)
+    context = context
+    query = args.query
 
     # Tokenize context and query
-    tokenizer = BytePairEncoder()   
-    context_tokens = tokenizer.tokenize(context)
-    query_tokens = tokenizer.tokenize(query)
+    tokenizer = BytePairEncoder(device=device)   
+    context_tokens_ids = tokenizer.encode(context) #torch.Tensor
+    query_tokens_ids = tokenizer.encode(query) #torch.Tensor
     
-    # Encode context and query
-    encoded_context = model.encode(context_tokens)
-    encoded_query = model.encode(query_tokens)
+    # Prepare input token IDs
+    bos_token_id = tokenizer.bos_token_id
+    eos_token_id = tokenizer.eos_token_id
+    sep_token_id = tokenizer.sep_token_id
+    input_token_ids = torch.cat((torch.tensor([bos_token_id]), context_tokens_ids, torch.tensor([sep_token_id]), query_tokens_ids), dim=0)
+
+
+    # Load the model
+    model = load_transformer_with_config(args.model_path, device)
     
     # Perform inference (searching/sampling)
-    results_tokens = model.infer(encoded_context, encoded_query)
-    results = tokenizer.detokenize(results_tokens)
+    results_tokens = model.inference(input_token_ids.unsqueeze(0).to(device), inference_method = args.infermode)
+    results = tokenizer.decode(results_tokens)
 
     print("Inference results:\n", results)
 

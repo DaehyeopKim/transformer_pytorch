@@ -17,7 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import logging
 import utils.positional_encoder as positional_encoder
-import utils.inference as inference
+import utils.inference_method as inference_method
 
 __all__ = [
     "FeedForward",
@@ -67,6 +67,10 @@ class FeedForward(nn.Module):
         return output
     
     def backward(self, grad_output):
+        """
+        Backward pass for the feed forward layer.
+        Note: This is implemented for educational purposes to understand gradient flow.
+        """
         grad_out2 = self.w2.backward(grad_output)
         grad_out1 = F.relu.backward(grad_out2)
         grad_x = self.w1.backward(grad_out1)
@@ -92,6 +96,7 @@ class Embedding(nn.Module):
     def backward(self, grad_output):
         """
         Backward pass for the embedding layer.
+        Note: This is implemented for educational purposes to understand gradient flow.
         Args:
             grad_output (torch.Tensor): Gradient of the output tensor.
         Returns:
@@ -322,17 +327,16 @@ class DecoderBlock(nn.Module):
         
         # Self-attention
         self_attn_output = self.self_attention(x, mask=generate_mask(x.size(1), x.device))
-        self_attn_output = self.norm(x + self_attn_output)
+        x = self.norm(x + self_attn_output)
         
-        # Cross-attention
         cross_attn_output = self.cross_attention(x, memory)
-        cross_attn_output = self.norm(self_attn_output + cross_attn_output)
+        x = self.norm(x + cross_attn_output)
         
         # Feed-forward
-        ff_output = self.feed_forward(cross_attn_output)
-        ff_output = self.norm(cross_attn_output + ff_output)
+        ff_output = self.feed_forward(x)
+        x = self.norm(x + ff_output)
 
-        return ff_output
+        return x
     
     def backward(self, grad_output, memory=None):
         """
@@ -414,16 +418,40 @@ class Transformer(nn.Module):
                  k_dim = 64, 
                  v_dim = 64, 
                  N = 6, 
-                 model_name = "Transformer"):
+                 model_name = "Transformer",
+                 tokenizer_name = "BytePairEncoder"):
         
         super().__init__()
+        
+        # Store all configuration parameters
+        self.config = {
+            'device': device,
+            'eos_token_id': eos_token_id,
+            'bos_token_id': bos_token_id,
+            'token_size': token_size,
+            'embed_dim': embed_dim,
+            'ffn_dim': ffn_dim,
+            'head_num': head_num,
+            'k_dim': k_dim,
+            'v_dim': v_dim,
+            'N': N,
+            'model_name': model_name,
+            'tokenizer_name': tokenizer_name
+        }
+        
+        # Also store as individual attributes for backward compatibility
+        self.device = device
         self.eos_token_id = eos_token_id
         self.bos_token_id = bos_token_id
-
-        self.device = device
         self.token_size = token_size
-
+        self.embed_dim = embed_dim
+        self.ffn_dim = ffn_dim
+        self.head_num = head_num
+        self.k_dim = k_dim
+        self.v_dim = v_dim
+        self.N = N
         self.model_name = model_name
+        self.tokenizer_name = tokenizer_name
         self.embedding = Embedding(token_size, embed_dim = embed_dim)
         self.positional_encoding = positional_encoder.PositionalEncoding(embed_dim)
         
@@ -433,7 +461,7 @@ class Transformer(nn.Module):
         self.output_layer = nn.Linear(embed_dim, token_size)  
         self.softmax = nn.Softmax(dim=-1)  # Softmax layer for output probabilities
 
-        self.inference_method = inference.TransformerInference(self.decoder, eos_token_id)
+        self.inference_method = inference_method.TransformerInference(self.decoder, eos_token_id)
 
     def forward(self, input_token_ids, output_token_ids):
         """
@@ -455,13 +483,14 @@ class Transformer(nn.Module):
         input_embed = self.embedding(input_token_ids)  
         output_embed = self.embedding(output_token_ids)
 
-        x = self.positional_encoding(x_embed)
+        encoder_input = self.positional_encoding(input_embed)
+        decoder_input = self.positional_encoding(output_embed)
 
         # Encoder
-        encoder_output = self.encoder(x)
+        encoder_output = self.encoder(encoder_input)
 
         # Decoder
-        decoder_output = self.decoder(encoder_output, memory = encoder_output)
+        decoder_output = self.decoder(decoder_input, memory=encoder_output)
 
         # Output layer
         output = self.output_layer(decoder_output)  # (batch_size, seq_len, token_size)
@@ -487,7 +516,7 @@ class Transformer(nn.Module):
         x = self.positional_encoding(input_embed)
         memory = self.encoder(x)
 
-        bos_token_ids = torch.full((batch_size, self.token_size), self.bos_token_id, device = self.device)
+        bos_token_ids = torch.full((batch_size, 1), self.bos_token_id, device=self.device)
 
         # Use the inference method to get the output
         output_tokens_ids = self.inference_method(bos_token_ids, 
@@ -496,9 +525,7 @@ class Transformer(nn.Module):
                                               inference_method = inference_method)
 
         return output_tokens_ids
-
-
-     
+ 
     def backward(self, grad_output, memory):
         """
         Backward pass for the transformer model.

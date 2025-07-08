@@ -4,3 +4,6 @@ dataset/
 virtual_test.py
 __pycache__/
 **/__pycache__/
+benchmark_transformer.py
+test_transformer.py
+quick_test.py
