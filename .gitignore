@@ -5,3 +5,8 @@ virtual_test.py
 __pycache__/
 **/__pycache__/
 sample/
+visualization_outputs/
+
+# test
+create_test_model.py
+test_batch_inference.sh
