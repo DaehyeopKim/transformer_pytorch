@@ -84,12 +84,12 @@ class Embedding(nn.Module):
     word embedding, but we implement it here for simplicity. 
     The distance of two tokens in this embedding space represents the similarity between the two tokens.  
     """
-    def __init__(self, token_size, embed_dim):
+    def __init__(self, vocab_size, embed_dim):
         """
         Embedding dimesion should be divisible by the number of heads in MultiHeadAttention.
         """
         super().__init__()
-        self.embedding = nn.Embedding(token_size, embed_dim)
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
 
     def forward(self, x):
         return self.embedding(x)
@@ -438,7 +438,7 @@ class Transformer(nn.Module):
                  device,
                  eos_token_id,
                  bos_token_id,
-                 token_size = 10000, 
+                 vocab_size, 
                  embed_dim = 512, 
                  ffn_dim = 2048, 
                  head_num = 8, 
@@ -456,7 +456,7 @@ class Transformer(nn.Module):
             'device': device,
             'eos_token_id': eos_token_id,
             'bos_token_id': bos_token_id,
-            'token_size': token_size,
+            'vocab_size': vocab_size,
             'embed_dim': embed_dim,
             'ffn_dim': ffn_dim,
             'head_num': head_num,
@@ -472,7 +472,7 @@ class Transformer(nn.Module):
         self.device = device
         self.eos_token_id = eos_token_id
         self.bos_token_id = bos_token_id
-        self.token_size = token_size
+        self.vocab_size = vocab_size
         self.embed_dim = embed_dim
         self.ffn_dim = ffn_dim
         self.head_num = head_num
@@ -482,13 +482,13 @@ class Transformer(nn.Module):
         self.model_name = model_name
         self.tokenizer_name = tokenizer_name
         self.dropout = dropout
-        self.embedding = Embedding(token_size, embed_dim = embed_dim)
+        self.embedding = Embedding(vocab_size, embed_dim = embed_dim)
         self.positional_encoding = positional_encoder.AbsoluteSinusoidalPositionalEmbedding(embed_dim) 
 
         self.encoder = Encoder(embed_dim, ffn_dim, head_num, k_dim, v_dim, N, dropout=dropout)
         self.decoder = Decoder(embed_dim, ffn_dim, head_num, k_dim, v_dim, N, dropout=dropout)
 
-        self.output_layer = nn.Linear(embed_dim, token_size)  
+        self.output_layer = nn.Linear(embed_dim, vocab_size)  
         self.dropout_layer = nn.Dropout(dropout)  # Dropout for embedding layer
 
         self.inference_method = inference_method.TransformerInference(self.decoder, eos_token_id, model=self)
@@ -512,7 +512,7 @@ class Transformer(nn.Module):
             output_token_ids (torch.Tensor): Output token tensor of shape (batch_size, seq_len).
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, seq_len, embed_dim).
-            torch.Tensor (optional): Logits tensor of shape (batch_size, seq_len, token_size) if return_logits is True.
+            torch.Tensor (optional): Logits tensor of shape (batch_size, seq_len, vocab_size) if return_logits is True.
         """
         if input_token_ids.dim() != 2:
             raise ValueError(f"Input tensor input_token_ids must be 2-dimensional, got {input_token_ids.dim()} dimensions.")
@@ -538,7 +538,8 @@ class Transformer(nn.Module):
         decoder_output = self.decoder(decoder_input, memory=encoder_output)
 
         # Output layer
-        output = self.output_layer(decoder_output)  # (batch_size, seq_len, token_size)
+        output = self.output_layer(decoder_output)  # (batch_size, seq_len, vocab_size)
+        logits = F.softmax(output, dim=-1)  # (batch_size, seq_len, vocab_size)
 
         if return_logits:
             return output, logits
@@ -579,6 +580,9 @@ class Transformer(nn.Module):
                                               memory, 
                                               max_length = max_length, 
                                               inference_method = inference_method)
+
+        print(f"Tokenizer's vocab size: {self.vocab_size}")
+        print(f"Generated output tokens IDs: {output_tokens_ids}")
 
         return output_tokens_ids
  

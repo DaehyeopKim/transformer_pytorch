@@ -8,7 +8,6 @@ This module provides various inference methods for the transformer model.
 '''
 import torch
 
-
 class TransformerInference:
     def __init__(self, decoder, eos_token_id, model=None):
         self.eos_token_id = eos_token_id
