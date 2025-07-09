@@ -135,6 +135,12 @@ class MultiHeadAttention(nn.Module):
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, seq_len, embed_dim).
             torch.Tensor (optional) : Attention scores of shape (batch_size, head_num, seq_len, seq_len) if return_attention is True.
+        Note:
+            The shape of self-attention score is (batch_size, head_num, seq_len, seq_len).
+            The shape of self-attention value is (batch_size, head_num, seq_len, v_dim).
+
+            The shape of cross-attention score is (batch_size, head_num, seq_len, memory_seq_len).
+            The shape of cross-attention value is (batch_size, head_num, memory_seq_len, v_dim).
         """
         batch_size, seq_len, embed_dim = x.shape
         if x.dim() != 3:
@@ -147,8 +153,8 @@ class MultiHeadAttention(nn.Module):
                 raise ValueError(f"Memory tensor must be 3-dimensional, got {memory.dim()} dimensions.")
             if memory.size(2) != embed_dim:
                 raise ValueError(f"Memory tensor's last dimension must match embed_dim {embed_dim}, got {memory.size(2)}.")
-            if memory.size(1) != seq_len:
-                raise ValueError(f"Memory tensor's second dimension must match seq_len {seq_len}, got {memory.size(1)}.")
+            # Note: In cross-attention, memory seq_len can be different from decoder seq_len
+            # This is normal in encoder-decoder architectures
             if memory.size(0) != x.size(0):
                 raise ValueError(f"Memory tensor's first dimension must match batch_size {x.size(0)}, got {memory.size(0)}.")
 
@@ -164,16 +170,30 @@ class MultiHeadAttention(nn.Module):
 
         # 2. Reshape and permute to get the correct dimensions for multi-head attention
         self.q = self.q.reshape(batch_size, seq_len, self.head_num, self.k_dim).transpose(1,2)  # q.shape = (batch_size, head_num, seq_len, k_dim)
-        self.k = self.k.reshape(batch_size, seq_len, self.head_num, self.k_dim).transpose(1,2)  # k.shape = (batch_size, head_num, seq_len, k_dim)
-        self.v = self.v.reshape(batch_size, seq_len, self.head_num, self.v_dim).transpose(1,2)  # v.shape = (batch_size, head_num, seq_len, v_dim)
+        
+        if self.cross_attention:
+            # For cross-attention, K and V come from memory with potentially different seq_len
+            memory_seq_len = memory.size(1)
+            self.k = self.k.reshape(batch_size, memory_seq_len, self.head_num, self.k_dim).transpose(1,2)  # k.shape = (batch_size, head_num, memory_seq_len, k_dim)
+            self.v = self.v.reshape(batch_size, memory_seq_len, self.head_num, self.v_dim).transpose(1,2)  # v.shape = (batch_size, head_num, memory_seq_len, v_dim)
+        else:
+            # For self-attention, all use the same seq_len
+            self.k = self.k.reshape(batch_size, seq_len, self.head_num, self.k_dim).transpose(1,2)  # k.shape = (batch_size, head_num, seq_len, k_dim)
+            self.v = self.v.reshape(batch_size, seq_len, self.head_num, self.v_dim).transpose(1,2)  # v.shape = (batch_size, head_num, seq_len, v_dim)
 
         # 3. Compute attention scores
-        similarity = torch.matmul(self.q, self.k.transpose(-2, -1)) / (self.k_dim ** 0.5)  # similarity.shape = (batch_size, head_num, seq_len, seq_len)
+        # For cross-attention: similarity.shape = (batch_size, head_num, seq_len, memory_seq_len)
+        # For self-attention: similarity.shape = (batch_size, head_num, seq_len, seq_len)
+        similarity = torch.matmul(self.q, self.k.transpose(-2, -1)) / (self.k_dim ** 0.5)
+        
         if mask is not None:
-            if mask.dim() != 2 or mask.size(0) != seq_len or mask.size(1) != seq_len:
-                raise ValueError(f"Mask must be 2-dimensional with shape (seq_len, seq_len), got {mask.shape}.")
-            mask = mask.unsqueeze(0).unsqueeze(0)
-            similarity = similarity+mask  # Apply mask to similarity scores
+            # Note: Mask is only applicable for self-attention (causal mask)
+            # Cross-attention typically doesn't use causal masking
+            if not self.cross_attention:
+                if mask.dim() != 2 or mask.size(0) != seq_len or mask.size(1) != seq_len:
+                    raise ValueError(f"Mask must be 2-dimensional with shape (seq_len, seq_len), got {mask.shape}.")
+                mask = mask.unsqueeze(0).unsqueeze(0)
+                similarity = similarity + mask  # Apply mask to similarity scores
         
         self.attn_score = F.softmax(similarity, dim=-1)  # attn_score.shape = (batch_size, head_num, seq_len, seq_len)
 
@@ -453,17 +473,16 @@ class Transformer(nn.Module):
         self.model_name = model_name
         self.tokenizer_name = tokenizer_name
         self.embedding = Embedding(token_size, embed_dim = embed_dim)
-        self.positional_encoding = positional_encoder.PositionalEncoding(embed_dim)
-        
+        self.positional_encoding = positional_encoder.AbsoluteSinusoidalPositionalEmbedding(embed_dim) 
+
         self.encoder = Encoder(embed_dim, ffn_dim, head_num, k_dim, v_dim, N)
         self.decoder = Decoder(embed_dim, ffn_dim, head_num, k_dim, v_dim, N)
 
         self.output_layer = nn.Linear(embed_dim, token_size)  
-        self.softmax = nn.Softmax(dim=-1)  # Softmax layer for output probabilities
 
-        self.inference_method = inference_method.TransformerInference(self.decoder, eos_token_id)
+        self.inference_method = inference_method.TransformerInference(self.decoder, eos_token_id, model=self)
 
-    def forward(self, input_token_ids, output_token_ids):
+    def forward(self, input_token_ids, output_token_ids, return_logits=False):
         """
         Forward pass for the transformer model. It's for training.
         If you want to use the model for inference, please use the inference method.
@@ -472,6 +491,7 @@ class Transformer(nn.Module):
             output_token_ids (torch.Tensor): Output token tensor of shape (batch_size, seq_len).
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, seq_len, embed_dim).
+            torch.Tensor (optional): Logits tensor of shape (batch_size, seq_len, token_size) if return_logits is True.
         """
         if input_token_ids.dim() != 2:
             raise ValueError(f"Input tensor input_token_ids must be 2-dimensional, got {input_token_ids.dim()} dimensions.")
@@ -494,31 +514,36 @@ class Transformer(nn.Module):
 
         # Output layer
         output = self.output_layer(decoder_output)  # (batch_size, seq_len, token_size)
-        logits = self.softmax(output)  # Apply softmax to get probabilities
-        
-        return logits
 
-    def inference(self, input_token_ids, max_length=50, inference_method="greedy"):
+        if return_logits:
+            return output, logits
+        else:
+            return output
+
+    def inference(self, input_token_ids, max_length=250, inference_method="greedy"):
         """
         Inference pass for the transformer model.
         Args:
             input_token_ids (torch.Tensor): Input token tensor of shape (batch_size, seq_len).
-            bos_toke_id (int): BOS token id.
+            max_length (int): Maximum length of output sequence.
+            inference_method (str): Inference method to use.
         Returns:
-            torch.Tensor: Output tensor of shape (batch_size, seq_len, token_size).
+            torch.Tensor: Generated token IDs of shape (batch_size, generated_length).
         """
         if input_token_ids.dim() != 2:
             raise ValueError(f"Input tensor input_token_ids must be 2-dimensional, got {input_token_ids.dim()} dimensions.")
 
         batch_size = input_token_ids.size(0)
 
+        # Encode input sequence to get memory
         input_embed = self.embedding(input_token_ids)
-        x = self.positional_encoding(input_embed)
-        memory = self.encoder(x)
+        encoder_input = self.positional_encoding(input_embed)
+        memory = self.encoder(encoder_input)
 
+        # Start with BOS token for decoder
         bos_token_ids = torch.full((batch_size, 1), self.bos_token_id, device=self.device)
 
-        # Use the inference method to get the output
+        # Use the inference method to generate output
         output_tokens_ids = self.inference_method(bos_token_ids, 
                                               memory, 
                                               max_length = max_length, 
