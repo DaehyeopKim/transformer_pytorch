@@ -4,9 +4,13 @@ dataset/
 virtual_test.py
 __pycache__/
 **/__pycache__/
+*.log
+**/*.log
 sample/
 visualization_outputs/
+
 
 # test
 create_test_model.py
 test_batch_inference.sh
+README_test.md
